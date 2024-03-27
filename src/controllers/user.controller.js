@@ -4,6 +4,26 @@ import { User } from "../models/user.model.js";
 import { uploadOnCloudinary } from "../utils/cloudinary.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 
+
+//method for generating access & refresh token 
+const generateAccessAndRefreshToken = async(userId) => {
+  try {
+    const user = await User.findById(userId)
+    const accessToken = user.generateAccessToken()
+    const refreshToken = user.generateRefreshToken()
+
+    //save refreshToken in DB
+    user.refreshToken = refreshToken
+    await user.save({validateBeforeSave: false}) //since we are updating only refresh token field and remaining as it is 
+
+    //return tokens
+    return {accessToken, refreshToken}
+
+  } catch (error) {
+    throw new ApiError(500, "Something went wrong while generating access and refresh token") 
+  }
+}
+
 const registerUser = asyncHandler(async (req, res) => {
   //1 get user details
   const { fullName, email, username, password } = req.body;
@@ -90,4 +110,77 @@ const registerUser = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, createdUser, "User registered successfully"));
 });
 
-export { registerUser }; //make sure you import this inside {} because you export this inside {}
+const loginUser = asyncHandler(async (req, res) => {
+  //1 get data from req body
+  const {email, username, password} = req.body;
+
+  //2 username or email
+if(!username || !email){
+  throw new ApiError(400, "Username or Email is required")
+}
+
+  //3 find the user (using mongoDB operators)
+const user = await User.findOne({
+  $or: [{email} , {username}]
+})
+
+if(!user){
+  throw new ApiError(400, "User doesn't exist")
+}
+
+  //4 check PWD
+  //check the methods you created by yourself in db with the instance you take here is user not the User
+  const isPasswordValid = await user.isPasswordCorrect(password)
+
+  if(!isPasswordValid){
+    throw new ApiError(401, "Invalid user credentials")
+  }
+
+  //5 access & refresh token
+ const {accessToken, refreshToken} = await generateAccessAndRefreshToken(user._id)
+
+ //since we got the info. from the User model but we got unwanted fields like pwd, refreshtoken
+ //if DB call is expensive then just update the object with the new value like user.refreshToken = refreshToken
+ const loggedInUser = await User.findById(user._id).select("-password -refreshToken")
+ 
+ //6 send cookie
+ //option
+ const options = {
+  httpOnly: true,
+  secure: true
+ }
+
+  return res.status(200)
+  .cookie("accessToken", accessToken, options)
+  .cookie("refreshToken", refreshToken, options)
+  .json(
+    new ApiResponse(200, {
+      user: loggedInUser,
+      accessToken,
+      refreshToken
+      //why we are sending tokens here if we pass them in cookie -> because if user want to save cookie in local storage due to user needs
+    },
+    "User logged in successfully")
+  )
+})
+
+const logoutUser = asyncHandler(async(req,res) => {
+//user lao (since we add our middleware verifyJWT in routes and in that middleware we add a user field in request so we get the user here )
+ await User.findByIdAndUpdate(req.user._id,{
+    $set: {refreshToken: undefined}
+  },{
+    new: true
+  })
+
+  //option
+ const options = {
+  httpOnly: true,
+  secure: true
+ }
+
+ return res.status(200).clearCookie("accessToken", options)
+ .clearCookie("refreshToken", options)
+ .json(new ApiResponse(200, {}, "User logged Out Successfully"))
+})
+
+export { registerUser, loginUser, logoutUser }; //make sure you import this inside {} because you export this inside {}
