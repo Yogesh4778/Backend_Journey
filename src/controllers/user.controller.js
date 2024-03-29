@@ -4,6 +4,7 @@ import { User } from "../models/user.model.js";
 import { uploadOnCloudinary } from "../utils/cloudinary.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
 
 //method for generating access & refresh token
 const generateAccessAndRefreshToken = async (userId) => {
@@ -360,6 +361,142 @@ const updateUserCoverImage = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, user, "Cover Image updated successfully"));
 });
 
+const getUserChannelProfile = asyncHandler(async (req, res) => {
+  const { username } = req.params;
+
+  if (!username?.trim()) {
+    throw new ApiError(400, "Username is missing");
+  }
+
+  //here we can find the document with the username by the below query
+  // User.find({username})
+
+  //but the problem here is first we find the id from the DB and then we apply aggregation on the basis of that id
+  //but you can apply direct aggregation using match field
+
+  //aggregation pipeline
+  const channel = await User.aggregate([
+    {
+      $match: {
+        username: username?.toLowerCase(),
+      }, //now at this step we filter a single document
+      //now we have to do lookup on the basis of that document
+      //finding subscribers of a channel
+    },
+    {
+      $lookup: {
+        from: "subscriptions",
+        localField: "_id",
+        foreignField: "channel",
+        as: "subscribers",
+      }, //in the above code we are finding the subscriber of a channel for that we have to select channel
+      // so from subscriptions model (plural and lowercase saved) finding id which have the channel
+    },
+    //now find the subscribed
+    {
+      $lookup: {
+        from: "subscriptions",
+        localField: "_id",
+        foreignField: "subscriber",
+        as: "subscribedTo",
+      },
+    },
+    //adding both the pipelines (adding additional field in user object)
+    {
+      $addFields: {
+        subscribersCount: {
+          $size: "$subscribers", //counting the document which we separate above
+        },
+        channelsSubscribedToCount: {
+          $size: "$subscribedTo",
+        },
+        isSubscribed: {
+          $cond: {
+            if: { $in: [req.user?._id, "$subscribers.subscriber"] },
+            // if        finding this    in this docs   in this field
+            //  $in is used to check the availability in array and obj both
+            then: true,
+            else: false
+          }
+        }
+      }
+    },
+    {
+      $project: {
+        fullName: 1,
+        username: 1,
+        avatar: 1,
+        coverImage: 1,
+        subscribersCount: 1,
+        channelsSubscribedToCount: 1,
+        isSubscribed: 1,
+        email: 1
+      }
+    }
+  ])
+  //DO console log channel
+  if(!channel?.length){
+    throw new ApiError(404, "channel does not exists")
+  }
+
+  return res.status(200)
+  .json(
+    new ApiResponse(200,channel[0], "User channel details fetched successfully")
+  )
+});
+
+const getWatchHistory = asyncHandler(async(req, res) => {
+  const user = await User.aggregate([
+    { //getting the user document
+      $match: {
+        _id: new mongoose.Types.ObjectId(req.user._id)
+      }
+    },
+    {  //getting the videos in watchHistory array
+      $lookup: {
+        from: "videos",
+        localField: "watchHistory",
+        foreignField: "_id",
+        as: "watchHistory",
+        //subpipeline (because we have a owner field in our DB with 
+        // ref to User so to get the details of owner we have to do lookup again for that we write sub pipeline)
+        pipeline: [
+          {
+            $lookup: {
+              from: "users",
+              localField: "owner",
+              foreignField: "_id",
+              as: "owner",
+              //giving only essential info rather than passing all info so we are writing this subpipeline
+              pipeline: [
+                {
+                  $project: {
+                    fullName: 1,
+                    username: 1,
+                    avatar: 1,
+                  }
+                }
+              ]
+            }
+          },
+          //changing the structure of data (For front end convenience)
+          {
+            $addFields: {
+              owner: { //getting first value from array (one way elementAt) 
+                $first: "$owner"
+              } //This will send FE 1 own er object from which data can be fetched easily.
+            }
+          }
+        ]
+      }
+    }
+  ])
+
+  return res.status(200).json(
+    new ApiResponse(200, user[0].watchHistory, "Watch History fetched successfully")
+  )
+})
+
 export {
   registerUser,
   loginUser,
@@ -370,4 +507,6 @@ export {
   updateAccountDetails,
   updateUserAvatar,
   updateUserCoverImage,
+  getUserChannelProfile,
+  getWatchHistory
 }; //make sure you import this inside {} because you export this inside {}
